@@ -1,0 +1,83 @@
+name: Sandbox Gatekeeper Test
+
+# V3 sandbox for ENG-1146 (BitModern/tq-llm-eval main-protection plan).
+# This workflow validates whether a `gatekeeper` job using `if: always()` +
+# `needs.*.result` aggregation correctly satisfies required-status-checks
+# under a ruleset, including the cascade-skip case where a downstream job
+# is skipped by an upstream `if:` condition.
+#
+# Test cases (PR labels drive behavior):
+#   A: no labels                      → validate=ok, worker=success, gatekeeper=success → PR mergeable
+#   B: sandbox:bot-pr                 → validate=ok (is_release=true), worker=skipped → gatekeeper=success → PR mergeable
+#   C: sandbox:fail-worker            → validate=ok, worker=failure, gatekeeper=failure → PR blocked
+#   D: sandbox:bot-pr + fail-worker   → validate=ok (is_release=true), worker=skipped → gatekeeper=success → PR mergeable
+#
+# Delete this workflow once V3 verification is complete.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      is_release: ${{ steps.x.outputs.is_release }}
+    steps:
+      - id: x
+        run: |
+          set -eo pipefail
+          LABELS='${{ toJson(github.event.pull_request.labels) }}'
+          if echo "$LABELS" | grep -q '"name": "sandbox:bot-pr"'; then
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "VALIDATE: treating as release (sandbox:bot-pr label found)"
+          else
+            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "VALIDATE: treating as standard PR"
+          fi
+
+  worker:
+    needs: validate
+    if: needs.validate.outputs.is_release != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set -eo pipefail
+          echo "WORKER: doing real work"
+          LABELS='${{ toJson(github.event.pull_request.labels) }}'
+          if echo "$LABELS" | grep -q '"name": "sandbox:fail-worker"'; then
+            echo "::error::Intentional worker failure (sandbox:fail-worker label found)"
+            exit 1
+          fi
+          echo "WORKER: success"
+
+  gatekeeper:
+    needs: [validate, worker]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate
+        env:
+          IS_RELEASE: ${{ needs.validate.outputs.is_release }}
+          V_RESULT: ${{ needs.validate.result }}
+          W_RESULT: ${{ needs.worker.result }}
+        run: |
+          set -eo pipefail
+          echo "GATEKEEPER: validate=$V_RESULT worker=$W_RESULT is_release=$IS_RELEASE"
+          if [ "$V_RESULT" = "failure" ]; then
+            echo "::error::validate failed"
+            exit 1
+          fi
+          if [ "$IS_RELEASE" = "true" ]; then
+            echo "Release path; worker skip is expected. Pass."
+            exit 0
+          fi
+          if [ "$W_RESULT" != "success" ]; then
+            echo "::error::worker did not succeed (got: $W_RESULT)"
+            exit 1
+          fi
+          echo "All checks passed"
