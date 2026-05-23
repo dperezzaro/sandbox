@@ -1,0 +1,29 @@
+name: 'pr-ci-test (paths-filtered)'
+
+# Mimics production pr-ci.yml: paths-filtered, multiple jobs. Does NOT
+# emit `pr-ci-passed` itself — that's the gatekeeper's job.
+
+on:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'app/**'
+      - 'package.json'
+
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: echo "install (would run yarn install)"
+  typecheck:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "typecheck"
+  lint:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "lint"

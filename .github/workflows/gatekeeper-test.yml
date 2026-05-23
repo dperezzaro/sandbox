@@ -1,0 +1,90 @@
+name: 'gatekeeper-test (always-runs)'
+
+# Option 2 candidate: a separate workflow that ALWAYS runs on every PR,
+# emits a single status check named `pr-ci-passed`, and is smart enough
+# to wait for pr-ci-test.yml (if it ran) and propagate its conclusion.
+#
+# Behavior:
+#   - PR touches paths-included files → pr-ci-test runs in parallel.
+#     Gatekeeper waits for pr-ci-test's jobs to finish and reports
+#     success/failure based on their aggregate outcome.
+#   - PR touches only paths-excluded files (docs/**, README.md, etc.) →
+#     pr-ci-test doesn't run. Gatekeeper detects this and reports success
+#     (no real CI was needed).
+#
+# Implementation uses gh CLI to poll for the sibling workflow's run.
+
+on:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize, reopened, ready_for_review]
+  # No paths filter — always runs.
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  pr-ci-passed: # name MUST match what the production ruleset expects
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for pr-ci-test (if it triggered)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eo pipefail
+
+          # Brief wait so pr-ci-test (if it's going to trigger) has time
+          # to register a run before we poll.
+          sleep 8
+
+          ATTEMPTS=0
+          MAX_ATTEMPTS=60 # 60 * 10 sec = 10 min ceiling
+
+          while true; do
+            ATTEMPTS=$((ATTEMPTS + 1))
+
+            # Look for pr-ci-test runs at the PR head SHA.
+            RUNS_JSON=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$HEAD_SHA&per_page=20" \
+                          --jq '[.workflow_runs[] | select(.name == "pr-ci-test (paths-filtered)") | {id, status, conclusion}]')
+            COUNT=$(echo "$RUNS_JSON" | jq 'length')
+
+            if [ "$COUNT" = "0" ]; then
+              # pr-ci-test didn't trigger for this SHA → it's a paths-excluded
+              # PR (e.g., docs-only). Gatekeeper reports success because the
+              # actual CI gate didn't apply.
+              if [ "$ATTEMPTS" -ge 4 ]; then
+                echo "pr-ci-test did not run for this PR (paths excluded). Pass."
+                exit 0
+              fi
+              echo "Attempt $ATTEMPTS: no pr-ci-test run yet; waiting..."
+              sleep 10
+              continue
+            fi
+
+            # pr-ci-test triggered. Wait for ALL of its job runs to complete.
+            INCOMPLETE=$(echo "$RUNS_JSON" | jq '[.[] | select(.status != "completed")] | length')
+            if [ "$INCOMPLETE" -gt 0 ]; then
+              echo "Attempt $ATTEMPTS: pr-ci-test runs still in progress ($INCOMPLETE incomplete)..."
+              sleep 10
+              if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+                echo "::error::Timed out waiting for pr-ci-test to complete after $MAX_ATTEMPTS attempts."
+                exit 1
+              fi
+              continue
+            fi
+
+            # All pr-ci-test runs completed. Check that ALL succeeded.
+            FAILED=$(echo "$RUNS_JSON" | jq '[.[] | select(.conclusion != "success" and .conclusion != "skipped")] | length')
+            if [ "$FAILED" -gt 0 ]; then
+              echo "::error::pr-ci-test had $FAILED failing run(s)."
+              echo "$RUNS_JSON" | jq .
+              exit 1
+            fi
+
+            echo "pr-ci-test ran and all runs succeeded. Pass."
+            exit 0
+          done
