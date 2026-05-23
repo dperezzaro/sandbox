@@ -1,0 +1,31 @@
+name: 'Test C — real matrix (expected: SUCCESS, deploy RUNS twice)'
+
+# Tests the happy path: apps has real entries, has-apps=true, deploy runs.
+# This confirms iter-2's gating doesn't accidentally suppress real deploys.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+jobs:
+  produce-real:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.s.outputs.apps }}
+      has-apps: ${{ steps.s.outputs.has-apps }}
+    steps:
+      - id: s
+        run: |
+          echo 'apps=["backender","auth-web"]' >> $GITHUB_OUTPUT
+          echo 'has-apps=true' >> $GITHUB_OUTPUT
+
+  consume:
+    needs: produce-real
+    if: needs.produce-real.outputs.has-apps == 'true'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.produce-real.outputs.apps) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying ${{ matrix.app }}"

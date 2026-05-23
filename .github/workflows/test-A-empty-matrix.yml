@@ -1,0 +1,29 @@
+name: 'Test A — empty matrix array (expected: STARTUP_FAILURE)'
+
+# Tests the iter-1 hypothesis: `apps=[]` + `if: fromJson(...)[0] != null`.
+# If GHA validates the matrix before evaluating `if:`, this should
+# startup_failure even though if: would evaluate to false.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+jobs:
+  produce-empty:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.s.outputs.apps }}
+    steps:
+      - id: s
+        run: echo 'apps=[]' >> $GITHUB_OUTPUT
+
+  consume:
+    needs: produce-empty
+    if: fromJson(needs.produce-empty.outputs.apps)[0] != null
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.produce-empty.outputs.apps) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "matrix.app = ${{ matrix.app }}"

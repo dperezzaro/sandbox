@@ -1,0 +1,32 @@
+name: 'Test B — placeholder matrix + has-apps gate (expected: SUCCESS, deploy SKIPPED)'
+
+# Tests the iter-2 fix: apps=["__none__"] + has-apps=false +
+# `if: needs.X.outputs.has-apps == 'true'`. Matrix has one entry so it
+# validates; deploy's if: is false so the job is skipped wholesale.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+jobs:
+  produce-placeholder:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.s.outputs.apps }}
+      has-apps: ${{ steps.s.outputs.has-apps }}
+    steps:
+      - id: s
+        run: |
+          echo 'apps=["__none__"]' >> $GITHUB_OUTPUT
+          echo 'has-apps=false' >> $GITHUB_OUTPUT
+
+  consume:
+    needs: produce-placeholder
+    if: needs.produce-placeholder.outputs.has-apps == 'true'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.produce-placeholder.outputs.apps) }}
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "SHOULD NOT RUN. matrix.app = ${{ matrix.app }}"

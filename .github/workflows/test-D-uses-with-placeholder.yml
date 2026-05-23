@@ -1,0 +1,35 @@
+name: 'Test D — placeholder + uses: pattern (real cd-staging shape)'
+
+# Like Test B but uses the reusable-workflow-call pattern that production
+# cd-staging.yml actually uses. The combination of matrix + uses: +
+# concurrency might behave differently than a plain matrix job.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+jobs:
+  produce-placeholder:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.s.outputs.apps }}
+      has-apps: ${{ steps.s.outputs.has-apps }}
+    steps:
+      - id: s
+        run: |
+          echo 'apps=["__none__"]' >> $GITHUB_OUTPUT
+          echo 'has-apps=false' >> $GITHUB_OUTPUT
+
+  consume:
+    needs: produce-placeholder
+    if: needs.produce-placeholder.outputs.has-apps == 'true'
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.produce-placeholder.outputs.apps) }}
+      fail-fast: false
+    concurrency:
+      group: testD-${{ matrix.app }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/test-D-reusable-stub.yml
+    with:
+      app_name: ${{ matrix.app }}
