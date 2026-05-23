@@ -1,0 +1,51 @@
+name: 'Test I — pre-iter-1 pattern (top-level if + null output)'
+
+# Replicates the PRE-iter-1 cd-staging.yml shape: top-level `if:` on
+# detect-affected. When the filter matches (bot actor / release commit),
+# detect-affected is SKIPPED → its outputs.apps is null. Then deploy's
+# matrix expression and `if:` reference a null output. The question:
+# does this gracefully skip, or fail?
+#
+# Setup matches Test H (success): caller declares `id-token: write` so the
+# permissions mismatch with the stub is resolved. The only variable left
+# under test is the SKIPPED-upstream-with-null-output behavior.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  detect-affected:
+    if: |
+      github.actor != 'tqai-deploy[bot]'
+      && !startsWith(github.event.head_commit.message, 'release(')
+      && !startsWith(github.event.head_commit.message, 'promote(')
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.detect.outputs.apps }}
+    steps:
+      - id: detect
+        run: echo 'apps=["backender"]' >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: detect-affected
+    if: fromJson(needs.detect-affected.outputs.apps)[0] != null
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-affected.outputs.apps) }}
+      fail-fast: false
+    concurrency:
+      group: testI-${{ matrix.app }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/test-H-deploy-ecr.yml
+    with:
+      app_name: ${{ matrix.app }}
+      sha: ${{ github.sha }}
+    secrets:
+      TQAI_DEPLOY_APP_ID: ${{ secrets.TQAI_DEPLOY_APP_ID }}
+      TQAI_DEPLOY_PRIVATE_KEY: ${{ secrets.TQAI_DEPLOY_PRIVATE_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
