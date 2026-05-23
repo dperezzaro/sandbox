@@ -1,0 +1,60 @@
+name: 'gatekeeper-v2-test (workflow_run + paths-ignore)'
+
+# Option 2-alt: polling-free version of the always-runs gatekeeper.
+#
+# Triggers:
+#   - workflow_run on pr-ci-test completion → propagate pr-ci's conclusion
+#   - pull_request with paths-ignore (mirror of pr-ci-test's paths) →
+#     fires ONLY for PRs that don't match pr-ci's paths. Reports success.
+#
+# Path-list sync risk: pr-ci-test's `paths:` and this file's `paths-ignore:`
+# must stay aligned. Drift opens the gap we're trying to close.
+
+on:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      # Must mirror pr-ci-test.yml's `paths:` field. If pr-ci-test's
+      # paths expand to include new globs, add them here too.
+      - 'app/**'
+      - 'package.json'
+  workflow_run:
+    workflows: ['pr-ci-test (paths-filtered)']
+    types: [completed]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
+jobs:
+  pr-ci-passed-v2: # named to avoid conflict with the polling-variant gatekeeper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide based on trigger
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -eo pipefail
+          if [ "$EVENT" = "workflow_run" ]; then
+            # pr-ci-test ran and completed — propagate its outcome.
+            echo "workflow_run event: pr-ci-test concluded with '$PR_CI_CONCLUSION'"
+            if [ "$PR_CI_CONCLUSION" = "success" ] \
+               || [ "$PR_CI_CONCLUSION" = "skipped" ] \
+               || [ "$PR_CI_CONCLUSION" = "neutral" ]; then
+              exit 0
+            else
+              echo "::error::pr-ci-test conclusion was '$PR_CI_CONCLUSION'."
+              exit 1
+            fi
+          elif [ "$EVENT" = "pull_request" ]; then
+            # pr-ci-test's paths excluded this PR (it touches only paths
+            # in our paths-ignore mirror). No CI needed; pass.
+            echo "pull_request event with paths-ignore match: pr-ci-test is not applicable. Pass."
+            exit 0
+          else
+            echo "::error::Unexpected trigger event: $EVENT"
+            exit 1
+          fi
