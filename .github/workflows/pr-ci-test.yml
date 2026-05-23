@@ -26,4 +26,4 @@ jobs:
     needs: install
     runs-on: ubuntu-latest
     steps:
-      - run: echo "lint"
+      - run: echo 'forcing failure'; exit 1
