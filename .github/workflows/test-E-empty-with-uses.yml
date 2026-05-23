@@ -1,0 +1,33 @@
+name: 'Test E — empty matrix + uses pattern (production shape)'
+
+# The most likely culprit for the production startup_failure: combining
+# empty matrix with the `uses:` reusable-workflow-call pattern + secrets.
+# Test A (empty matrix + regular job) was SUCCESS. Test D (placeholder +
+# uses:) was SUCCESS. Production = empty + uses, never directly tested.
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+jobs:
+  produce-empty:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.s.outputs.apps }}
+    steps:
+      - id: s
+        run: echo 'apps=[]' >> $GITHUB_OUTPUT
+
+  consume:
+    needs: produce-empty
+    if: fromJson(needs.produce-empty.outputs.apps)[0] != null
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.produce-empty.outputs.apps) }}
+      fail-fast: false
+    concurrency:
+      group: testE-${{ matrix.app }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/test-D-reusable-stub.yml
+    with:
+      app_name: ${{ matrix.app }}
