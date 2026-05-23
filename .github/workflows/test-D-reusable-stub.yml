@@ -1,4 +1,4 @@
-name: Test D — reusable stub
+name: 'Test D — reusable stub (with secret)'
 
 on:
   workflow_call:
@@ -6,9 +6,14 @@ on:
       app_name:
         required: true
         type: string
+    secrets:
+      FAKE_SECRET:
+        required: true
 
 jobs:
   stub:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Would deploy ${{ inputs.app_name }}"
+      - run: echo "Would deploy ${{ inputs.app_name }} (secret len=${#FAKE_SECRET})"
+        env:
+          FAKE_SECRET: ${{ secrets.FAKE_SECRET }}
