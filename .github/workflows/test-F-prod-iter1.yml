@@ -1,0 +1,131 @@
+name: 'Test F — exact iter-1 (prod copy)'
+
+# ENG-1146 §4.1: the entrypoint for the CD-on-merge model.
+#
+# Triggered on every push to `main`. Detects which apps changed via turbo's
+# affected-detection, then matrix-deploys each via deploy-ecr.yml (§4.2).
+# Each deploy: builds a new Docker image from the new main HEAD, pushes
+# it to ECR with a freshly-computed semver tag, and opens an auto-merging
+# release PR that bumps Chart.yaml + package.json. ArgoCD picks up the
+# Chart.yaml change and rolls out staging.
+#
+# Loop prevention is critical: the release PRs opened by this flow get
+# auto-merged via auto-enable-automerge.yml (§4.6), which produces another
+# `push: branches: [main]` event. Without filtering, we'd recursively
+# trigger ourselves. Two-layer filter, applied INSIDE the detect step:
+#   - Primary: actor — bot-authored merges have github.actor = tqai-deploy[bot]
+#   - Secondary: commit-message — release PRs squash-merge with
+#     "release(<app>): <version>"; promote PRs with "promote(<app>): prod → <v>"
+# Either filter alone catches the loop; both together cover edge cases.
+#
+# The guard MUST live inside the detect step (not as a job-level `if:`). When
+# the guard runs as a job-level `if:` and skips detect-affected, the matrix
+# expression on `deploy` (`fromJson(needs.detect-affected.outputs.apps)`) gets
+# a null output and matrix expansion blows up at workflow startup. By keeping
+# the guard inside and always emitting `apps=[]` on loop-trigger, deploy's
+# `if: fromJson(...)[0] != null` cleanly evaluates to false and skips with no
+# startup error.
+#
+# Client (apps/client) is NOT included here — it's S3/CloudFront, not
+# image-based. Continues to deploy via its own deploy-client.yml.
+# Tracked as §11 follow-up: "Investigate unifying client deploys with
+# cd-staging.yml".
+
+on:
+  push:
+    branches: ['test/empty-matrix-validation']
+
+permissions:
+  contents: read
+
+jobs:
+  detect-affected:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.detect.outputs.apps }}
+    steps:
+      - id: loop-check
+        # Env-var indirection for head_commit.message: it's the only attacker-
+        # controllable string and could otherwise break out of `${{ ... }}`
+        # interpolation in a shell script. github.actor is GitHub-controlled
+        # (login string) so safe to use directly.
+        env:
+          ACTOR: ${{ github.actor }}
+          HEAD_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          set -eo pipefail
+          if [ "$ACTOR" = "tqai-deploy[bot]" ] \
+             || [[ "$HEAD_MSG" == "release("* ]] \
+             || [[ "$HEAD_MSG" == "promote("* ]]; then
+            echo "Loop trigger detected (actor=$ACTOR, msg-prefix=${HEAD_MSG%%$'\n'*})."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+      - if: steps.loop-check.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1 # SHALLOW; targeted-fetch the BEFORE commit below.
+      - id: detect
+        env:
+          SKIP: ${{ steps.loop-check.outputs.skip }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -eo pipefail
+          # Loop trigger path: emit valid empty JSON so deploy's matrix
+          # expression evaluates without throwing and the deploy job
+          # cleanly skips via its `if: fromJson(...)[0] != null`.
+          if [ "$SKIP" = "true" ]; then
+            echo "apps=[]" >> $GITHUB_OUTPUT
+            echo "Loop trigger — skipping affected-detection; deploy will be skipped."
+            exit 0
+          fi
+          # If BEFORE is all-zeros (initial push or force-overwrite — the
+          # latter is blocked by the non_fast_forward rule but handle anyway),
+          # we don't have a meaningful base. Deepen to fetch the parent and
+          # use HEAD~1.
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            git fetch --depth=2 origin "$AFTER"
+            BEFORE="HEAD~1"
+          else
+            # Targeted fetch: just the BEFORE commit + its tree.
+            # GitHub allows fetch-by-SHA for reachable commits (V2 sandbox).
+            # main's non_fast_forward rule guarantees BEFORE stays reachable.
+            git fetch --depth=1 origin "$BEFORE"
+          fi
+          # `yarn --silent` suppresses yarn's "Update available" banner and
+          # similar stderr noise that would contaminate the JSON pipe.
+          AFFECTED=$(yarn --silent turbo run build --dry=json \
+                       --filter="...[$BEFORE...$AFTER]" \
+                     | jq -c '[.packages[]
+                              | select(startswith("@testlm/"))
+                              | sub("@testlm/"; "")]')
+          # Allowlist of apps that can be deployed via deploy-ecr.yml
+          # (image-based, with a Dockerfile + chart/Chart.yaml). Client is
+          # S3-based and excluded — see header comment.
+          DEPLOYABLE='["auth-web","backender","github-app","qdrant-indexer","sync-server","website"]'
+          FINAL=$(jq -nc --argjson a "$AFFECTED" --argjson d "$DEPLOYABLE" \
+                   '$a - ($a - $d)')
+          echo "apps=$FINAL" >> $GITHUB_OUTPUT
+          echo "Affected apps from turbo: $AFFECTED"
+          echo "Deployable affected apps (intersected with allowlist): $FINAL"
+
+  deploy:
+    needs: detect-affected
+    if: fromJson(needs.detect-affected.outputs.apps)[0] != null
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-affected.outputs.apps) }}
+      # If one app deploy fails, let the others continue. They're independent.
+      fail-fast: false
+    concurrency:
+      # Per-app concurrency: rapid merges that affect the same app queue
+      # behind each other instead of running in parallel (which would race
+      # on tag creation). cancel-in-progress: false because we want every
+      # commit to eventually deploy — not silently skipped.
+      group: cd-staging-${{ matrix.app }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/test-D-reusable-stub.yml
+    with:
+      app_name: ${{ matrix.app }}
