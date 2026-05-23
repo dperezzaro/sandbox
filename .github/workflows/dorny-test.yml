@@ -1,0 +1,93 @@
+name: 'dorny-test (single-workflow, paths-filter at runtime)'
+
+# Mirror of the industry-standard single-workflow gatekeeper pattern:
+#   1. No paths filter on the trigger — always runs on every PR
+#   2. A `detect-changes` job uses dorny/paths-filter to classify the PR
+#   3. Heavy jobs gated on `if: needs.detect-changes.outputs.<category> == 'true'`
+#   4. An `if: always()` aggregator (`pr-ci-passed-dorny`) treats skipped jobs as OK
+
+on:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+      docs: ${{ steps.filter.outputs.docs }}
+      app_files: ${{ steps.filter.outputs.app_files }}
+      docs_files: ${{ steps.filter.outputs.docs_files }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          list-files: shell # also outputs the matched file list for diagnostics
+          filters: |
+            app:
+              - 'app/**'
+              - 'package.json'
+            docs:
+              - 'docs/**'
+              - '*.md'
+
+  fake-typecheck:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Would typecheck — app changed."
+          echo "App files: ${{ needs.detect-changes.outputs.app_files }}"
+
+  fake-lint:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Would lint — app changed."
+
+  pr-ci-passed-dorny: # would be `pr-ci-passed` in prod; renamed to avoid clash
+    if: always()
+    needs: [detect-changes, fake-typecheck, fake-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate
+        env:
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          TYPECHECK_RESULT: ${{ needs.fake-typecheck.result }}
+          LINT_RESULT: ${{ needs.fake-lint.result }}
+          APP: ${{ needs.detect-changes.outputs.app }}
+          DOCS: ${{ needs.detect-changes.outputs.docs }}
+        run: |
+          set -eo pipefail
+          echo "detect-changes: $DETECT_RESULT (app=$APP, docs=$DOCS)"
+          echo "fake-typecheck: $TYPECHECK_RESULT"
+          echo "fake-lint:      $LINT_RESULT"
+
+          if [ "$DETECT_RESULT" != "success" ]; then
+            echo "::error::detect-changes itself failed"
+            exit 1
+          fi
+
+          if [ "$APP" = "true" ]; then
+            # Heavy jobs were required to run; they must be success.
+            for r in "$TYPECHECK_RESULT" "$LINT_RESULT"; do
+              if [ "$r" != "success" ]; then
+                echo "::error::Heavy job did not succeed (got '$r')"
+                exit 1
+              fi
+            done
+            echo "OK — app changed, all heavy jobs green."
+          else
+            # No relevant paths changed; heavy jobs cascade-skipped via if:.
+            # That's the docs-only / non-code path; aggregate as success.
+            echo "OK — no relevant paths changed; heavy jobs correctly skipped."
+          fi
+          exit 0
