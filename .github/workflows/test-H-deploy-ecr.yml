@@ -1,0 +1,65 @@
+name: 'Test H — deploy-ecr stub (prod signature)'
+
+# ENG-1146 §4.2: refactored as the reusable backend deploy workflow for the
+# CD-on-merge model. Called from cd-staging.yml (§4.1) and from the legacy
+# deploy-<app>.yml workflows (kept transitionally until §4.8b cutover).
+#
+# What it does (new model):
+#   1. Compute next semver from the latest <app>-X.Y.Z git tag (via
+#      `git ls-remote`, no local tag fetch needed).
+#   2. Build the Docker image with --build-arg APP_VERSION=<semver>, push to
+#      ECR tagged with BOTH the new semver AND the input SHA (for traceability).
+#   3. Push the semver tag (e.g., backender-1.0.131) on the input SHA, with a
+#      race-mitigation re-check just before push.
+#   4. Open a release PR bumping apps/<app>/package.json + chart/Chart.yaml
+#      (+ any extra sibling charts) to the new version. PR auto-merges via
+#      auto-enable-automerge.yml + pr-ci-passed gatekeeper.
+#
+# Inputs:
+#   app_name — application name (also used as the ECR repo name + Dockerfile path)
+#   sha      — commit SHA to deploy
+#
+# Sibling charts (e.g., backender-worker shares the backender image): handled
+# via a hardcoded lookup in this workflow rather than a per-caller input,
+# since there's only one such case today.
+#
+# Note: the legacy deploy-<app>.yml callers in this repo currently pass the
+# OLD interface (ecr_repository, chart_path, etc.) and DO NOT pass `sha`.
+# They will break against this workflow until §4.8b retires their tag
+# triggers in favor of dispatch-only with explicit `sha` input. This is
+# expected — the legacy callers are dormant on the feat branch and become
+# inactive at the Phase 3 cutover.
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+        description: 'Application name (used for ECR repo, Dockerfile path, Chart.yaml path).'
+      sha:
+        required: true
+        type: string
+        description: 'Commit SHA to deploy. Image is built from this SHA; the new semver tag is pushed on it.'
+    secrets:
+      TQAI_DEPLOY_APP_ID:
+        required: true
+        description: 'GitHub App ID for tqai-deploy.'
+      TQAI_DEPLOY_PRIVATE_KEY:
+        required: true
+        description: 'PEM private key for the tqai-deploy GitHub App.'
+      SLACK_WEBHOOK_URL:
+        required: false
+        description: 'Slack webhook URL for deployment notifications.'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Would deploy ${{ inputs.app_name }} (sha=${{ inputs.sha }})"
+          echo "Have TQAI_DEPLOY_APP_ID? $([ -n \"${{ secrets.TQAI_DEPLOY_APP_ID }}\" ] && echo yes || echo no)"
